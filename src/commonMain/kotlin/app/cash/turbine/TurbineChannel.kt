@@ -15,6 +15,10 @@
  */
 package app.cash.turbine
 
+import kotlin.reflect.KClass
+import kotlin.reflect.KType
+import kotlin.reflect.KTypeParameter
+import kotlin.reflect.typeOf
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -81,14 +85,42 @@ public interface TurbineChannel<T>: TurbineReceiveChannel<T>  {
 
 public operator fun <T> TurbineChannel<T>.plusAssign(value: T) { add(value) }
 
+public inline fun <reified T> TurbineChannel(): TurbineChannel<T> = TurbineChannel(description<T>())
+
 /**
- * Construct a standalone [TurbineChannel] with an [UNLIMITED] buffer size.
+ * Construct a standalone [TurbineChannel] with an [UNLIMITED] buffer size. [description] is used in thrown
+ * exceptions to improve error reporting.
  */
-public fun <T> TurbineChannel(): TurbineChannel<T> = TurbineChannelImpl()
+public fun <T> TurbineChannel(description: String): TurbineChannel<T> = TurbineChannelImpl(description = description)
+
+public inline fun <reified T> description(): String {
+  val type = typeOf<T>()
+  return description(T::class.qualifiedName!!, type)
+}
+
+public fun description(baseDescription: String, type: KType?): String {
+  if (type == null) {
+    return baseDescription
+  }
+  val typeArguments = type.arguments
+  val typeParamsList = typeArguments.map { description(it.type) }.joinToString(",")
+  return baseDescription + if (typeArguments.isEmpty()) "" else "<$typeParamsList>"
+}
+
+private fun description(type: KType?) = description(baseDescription(type), type)
+
+private fun baseDescription(type: KType?) = when (val classifier = type?.classifier) {
+  is KClass<*> -> classifier.qualifiedName!!
+  is KTypeParameter -> classifier.name
+  null -> "*"
+  else -> classifier.toString()
+}
 
 internal class TurbineChannelImpl<T>(
   private val channel: Channel<T> = Channel(UNLIMITED),
   private val job: Job? = null,
+  private val timeoutMillis: Long = 1000,
+  private val description: String? = null,
 ) : TurbineChannel<T> {
   override fun asChannel(): Channel<T> = object : Channel<T> by channel {
     override fun tryReceive(): ChannelResult<T> {
@@ -122,13 +154,13 @@ internal class TurbineChannelImpl<T>(
     job?.cancelAndJoin()
   }
 
-  override fun takeEvent(): Event<T> = asChannel().takeEvent()
+  override fun takeEvent(): Event<T> = asChannel().takeEvent(description)
 
-  override fun takeItem(): T = asChannel().takeItem()
+  override fun takeItem(): T = asChannel().takeItem(description)
 
-  override fun takeComplete() = asChannel().takeComplete()
+  override fun takeComplete() = asChannel().takeComplete(description)
 
-  override fun takeError(): Throwable = asChannel().takeError()
+  override fun takeError(): Throwable = asChannel().takeError(description)
 
   private var _ignoreTerminalEvents = false
   private var _ignoreRemainingEvents = false
@@ -156,20 +188,20 @@ internal class TurbineChannelImpl<T>(
   }
 
   override fun expectNoEvents() {
-    asChannel().expectNoEvents()
+    asChannel().expectNoEvents(description)
   }
 
-  override fun expectMostRecentItem(): T = asChannel().expectMostRecentItem()
+  override fun expectMostRecentItem(): T = asChannel().expectMostRecentItem(description)
 
-  override suspend fun awaitEvent(): Event<T> = asChannel().awaitEvent()
+  override suspend fun awaitEvent(): Event<T> = asChannel().awaitEvent(timeoutMillis, description)
 
-  override suspend fun awaitItem(): T = asChannel().awaitItem()
+  override suspend fun awaitItem(): T = asChannel().awaitItem(timeoutMillis, description)
 
-  override suspend fun skipItems(count: Int) = asChannel().skipItems(count)
+  override suspend fun skipItems(count: Int) = asChannel().skipItems(count, timeoutMillis, description)
 
-  override suspend fun awaitComplete() = asChannel().awaitComplete()
+  override suspend fun awaitComplete() = asChannel().awaitComplete(timeoutMillis, description)
 
-  override suspend fun awaitError(): Throwable = asChannel().awaitError()
+  override suspend fun awaitError(): Throwable = asChannel().awaitError(timeoutMillis, description)
 
   override fun ensureAllEventsConsumed() {
     if (ignoreRemainingEvents) return

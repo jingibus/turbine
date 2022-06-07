@@ -16,9 +16,11 @@
 package app.cash.turbine
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.ChannelResult
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.withTimeout
 
 /**
  * Returns the most recent item that has already been received.
@@ -28,7 +30,7 @@ import kotlinx.coroutines.channels.ReceiveChannel
  *
  * @throws AssertionError if no item was emitted.
  */
-public fun <T> ReceiveChannel<T>.expectMostRecentItem(): T {
+public fun <T> ReceiveChannel<T>.expectMostRecentItem(description: String? = null): T {
   var result: ChannelResult<T>? = null
   var prevResult: ChannelResult<T>?
   while (true) {
@@ -41,8 +43,7 @@ public fun <T> ReceiveChannel<T>.expectMostRecentItem(): T {
   }
 
   if (prevResult?.isSuccess == true) return prevResult!!.getOrThrow()
-
-  throw TurbineAssertionError("No item was found", cause = null)
+  throw TurbineAssertionError("No item was found".prefix(description), cause = null)
 }
 
 /**
@@ -53,9 +54,9 @@ public fun <T> ReceiveChannel<T>.expectMostRecentItem(): T {
  *
  * @throws AssertionError if unconsumed events are found.
  */
-public fun <T> ReceiveChannel<T>.expectNoEvents() {
+public fun <T> ReceiveChannel<T>.expectNoEvents(description: String? = null) {
   val result = tryReceive()
-  if (result.isSuccess || result.isClosed) result.unexpectedResult("no events")
+  if (result.isSuccess || result.isClosed) result.unexpectedResult("no events", description)
 }
 
 /**
@@ -64,16 +65,25 @@ public fun <T> ReceiveChannel<T>.expectNoEvents() {
  *
  * This function will always return a terminal event on a closed [ReceiveChannel].
  */
-public suspend fun <T> ReceiveChannel<T>.awaitEvent(): Event<T> =
-  try {
-    Event.Item(receive())
-  } catch (e: CancellationException) {
-    throw e
-  } catch (e: ClosedReceiveChannelException) {
-    Event.Complete
-  } catch (e: Exception) {
-    Event.Error(e)
+public suspend fun <T> ReceiveChannel<T>.awaitEvent(
+  timeoutMillis: Long = 1000,
+  description: String? = null,
+): Event<T> = try {
+  withTimeout(timeoutMillis) {
+    try {
+      Event.Item(receive())
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: ClosedReceiveChannelException) {
+      Event.Complete
+    } catch (e: Exception) {
+      Event.Error(e)
+    }
   }
+} catch (e: TimeoutCancellationException) {
+error(description?.let { "No value produced for $it in ${timeoutMillis}ms" }
+  ?: "No value produced in ${timeoutMillis}ms")
+}
 
 /**
  * Assert that the next event received was non-null and return it.
@@ -81,10 +91,12 @@ public suspend fun <T> ReceiveChannel<T>.awaitEvent(): Event<T> =
  *
  * @throws AssertionError if the next event was completion or an error.
  */
-public fun <T> ReceiveChannel<T>.takeEvent(): Event<T> {
+public fun <T> ReceiveChannel<T>.takeEvent(
+  description: String? = null,
+): Event<T> {
   assertCallingContextIsNotSuspended()
   return takeEventUnsafe()
-    ?: unexpectedEvent(null, "an event")
+    ?: unexpectedEvent(null, "an event", description)
 }
 
 internal fun <T> ReceiveChannel<T>.takeEventUnsafe(): Event<T>? {
@@ -97,9 +109,9 @@ internal fun <T> ReceiveChannel<T>.takeEventUnsafe(): Event<T>? {
  *
  * @throws AssertionError if the next event was completion or an error, or no event.
  */
-public fun <T> ReceiveChannel<T>.takeItem(): T {
-  val event = takeEvent()
-  return (event as? Event.Item)?.value ?: unexpectedEvent(event, "item")
+public fun <T> ReceiveChannel<T>.takeItem(description: String? = null): T {
+  val event = takeEvent(description)
+  return (event as? Event.Item)?.value ?: unexpectedEvent(event, "item", description)
 }
 
 /**
@@ -108,9 +120,9 @@ public fun <T> ReceiveChannel<T>.takeItem(): T {
  *
  * @throws AssertionError if the next event was completion or an error.
  */
-public fun <T> ReceiveChannel<T>.takeComplete() {
-  val event = takeEvent()
-  if (event !is Event.Complete) unexpectedEvent(event, "complete")
+public fun <T> ReceiveChannel<T>.takeComplete(description: String? = null) {
+  val event = takeEvent(description)
+  if (event !is Event.Complete) unexpectedEvent(event, "complete", description)
 }
 
 /**
@@ -119,9 +131,9 @@ public fun <T> ReceiveChannel<T>.takeComplete() {
  *
  * @throws AssertionError if the next event was completion or an error.
  */
-public fun <T> ReceiveChannel<T>.takeError(): Throwable {
-  val event = takeEvent()
-  return (event as? Event.Error)?.throwable ?: unexpectedEvent(event, "error")
+public fun <T> ReceiveChannel<T>.takeError(description: String? = null): Throwable {
+  val event = takeEvent(description)
+  return (event as? Event.Error)?.throwable ?: unexpectedEvent(event, "error", description)
 }
 
 /**
@@ -130,11 +142,15 @@ public fun <T> ReceiveChannel<T>.takeError(): Throwable {
  *
  * @throws AssertionError if the next event was completion or an error.
  */
-public suspend fun <T> ReceiveChannel<T>.awaitItem(): T =
-  when (val result = awaitEvent()) {
-    is Event.Item -> result.value
-    else -> unexpectedEvent(result, "item")
-  }
+public suspend fun <T> ReceiveChannel<T>.awaitItem(
+  timeoutMillis: Long = 1000,
+  description: String? = null,
+): T =
+    when (val result = awaitEvent(timeoutMillis, description)) {
+      is Event.Item -> result.value
+      else -> unexpectedEvent(result, "item", description)
+    }
+
 
 /**
  * Assert that [count] item events were received and ignore them.
@@ -142,9 +158,13 @@ public suspend fun <T> ReceiveChannel<T>.awaitItem(): T =
  *
  * @throws AssertionError if one of the events was completion or an error.
  */
-public suspend fun <T> ReceiveChannel<T>.skipItems(count: Int) {
+public suspend fun <T> ReceiveChannel<T>.skipItems(
+  count: Int,
+  timeoutMillis: Long = 1000,
+  description: String? = null,
+) {
   repeat(count) { index ->
-    when (val event = awaitEvent()) {
+    when (val event = awaitEvent(timeoutMillis, description)) {
       Event.Complete, is Event.Error -> {
         val cause = (event as? Event.Error)?.throwable
         throw TurbineAssertionError("Expected $count items but got $index items and $event", cause)
@@ -160,10 +180,13 @@ public suspend fun <T> ReceiveChannel<T>.skipItems(count: Int) {
  *
  * @throws AssertionError if the next event was an item or an error.
  */
-public suspend fun <T> ReceiveChannel<T>.awaitComplete() {
+public suspend fun <T> ReceiveChannel<T>.awaitComplete(
+  timeoutMillis: Long = 1000,
+  description: String? = null,
+) {
   val event = awaitEvent()
   if (event != Event.Complete) {
-    unexpectedEvent(event, "complete")
+    unexpectedEvent(event, "complete", description)
   }
 }
 
@@ -173,10 +196,13 @@ public suspend fun <T> ReceiveChannel<T>.awaitComplete() {
  *
  * @throws AssertionError if the next event was an item or completion.
  */
-public suspend fun  <T> ReceiveChannel<T>.awaitError(): Throwable {
+public suspend fun  <T> ReceiveChannel<T>.awaitError(
+  timeoutMillis: Long = 1000,
+  description: String? = null,
+): Throwable {
   val event = awaitEvent()
   return (event as? Event.Error)?.throwable
-    ?: unexpectedEvent(event, "error")
+    ?: unexpectedEvent(event, "error", description)
 }
 
 internal fun <T> ChannelResult<T>.toEvent(): Event<T>? {
@@ -187,10 +213,18 @@ internal fun <T> ChannelResult<T>.toEvent(): Event<T>? {
   else if (isClosed) Event.Complete
   else null
 }
-private fun <T> ChannelResult<T>.unexpectedResult(expected: String): Nothing = unexpectedEvent(toEvent(), expected)
+private fun <T> ChannelResult<T>.unexpectedResult(expected: String, description: String?): Nothing =
+  unexpectedEvent(toEvent(), expected, description)
 
-private fun unexpectedEvent(event: Event<*>?, expected: String): Nothing {
+private fun unexpectedEvent(event: Event<*>?, expected: String, description: String?): Nothing {
   val cause = (event as? Event.Error)?.throwable
   val eventAsString = event?.toString() ?: "no items"
-  throw TurbineAssertionError("Expected $expected but found $eventAsString", cause)
+  throw TurbineAssertionError("Expected $expected but found $eventAsString".prefix(description), cause)
 }
+
+private fun String.prefix(description: String?) =
+  if (description != null) {
+    "$description: $this"
+  } else {
+    this
+  }

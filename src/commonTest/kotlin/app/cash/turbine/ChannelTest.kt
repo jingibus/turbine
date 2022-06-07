@@ -254,6 +254,15 @@ class ChannelTest {
     assertEquals("Calling context is suspending; use a suspending method instead", actual.message)
   }
 
+  @Test fun awaitItemWithTimeout() = runTest {
+    val channel = Channel<Int>()
+    val actual = assertFailsWith<IllegalStateException> {
+      channel.awaitItem(description = "some integer")
+    }
+
+    assertEquals("No value produced for some integer in 1000ms", actual.message)
+  }
+
   /**
    * Used to run test code with a [TestScope], but still outside a suspending context.
    */
